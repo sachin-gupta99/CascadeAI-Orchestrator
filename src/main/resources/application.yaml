@@ -1,0 +1,45 @@
+spring:
+  application:
+    name: CascadeAI-Orchestrator
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/pipeline
+    username: pipeline
+    password: pipeline_secret
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 2000ms
+
+server:
+  port: 8080
+
+pipeline:
+  senior-engineer-email: senior.engineer@yourcompany.com
+  queue:
+    # Channels published TO Python
+    start: "pipeline:start"
+    coding-approved: "pipeline:coding:approved"
+    # Channels consumed FROM Python
+    transcript-done: "pipeline:transcript:done"
+    requirements-done: "pipeline:requirements:done"
+    pr-created: "pipeline:pr:created"
+    complete: "pipeline:complete"
+    failed: "pipeline:failed"
+
+logging:
+  level:
+    com.pipeline: DEBUG
+    org.springframework.data.redis: INFO
