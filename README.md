@@ -1,6 +1,6 @@
 # CascadeAI Orchestrator
 
-Spring Boot service that orchestrates an AI-powered pipeline for turning meeting transcripts into code changes. It coordinates Python AI agents (via Redis pub/sub), persists pipeline state in PostgreSQL, and exposes a REST API for a frontend dashboard and human-in-the-loop approval gates.
+Spring Boot service that orchestrates an AI-powered pipeline for turning meeting transcripts into code changes. It coordinates Python AI agents (via Redis Streams), persists pipeline state in PostgreSQL, and exposes a REST API for a frontend dashboard and human-in-the-loop approval gates.
 
 ## Architecture
 
@@ -17,13 +17,14 @@ Spring Boot service that orchestrates an AI-powered pipeline for turning meeting
                          |   (Spring Boot)       |
                          +-----------+-----------+
                             |                 |
-                     PostgreSQL          Redis Pub/Sub
+                     PostgreSQL          Redis Streams
                      (state)             (messaging)
                                               |
-                         +--------------------+--------------------+
-                         |                    |                    |
-                   Transcript Agent   Requirements Agent    Coding Agent
-                      (Python)            (Python)           (Python)
+                         +--------+-----------+-----------+--------+
+                         |        |                       |        |
+                   Transcript  Requirements          Coding    Mailing
+                     Agent       Agent                Agent     Agent
+                    (Python)    (Python)             (Python)  (Python)
 ```
 
 ## Pipeline Flow
@@ -36,18 +37,19 @@ PENDING -> TRANSCRIBING -> ANALYZING -> AWAITING_APPROVAL -> CODING -> PULL_REQU
                                          (rejected) ----+--- (PR rejected) -+---> FAILED
 ```
 
-1. **Trigger** -- A client POSTs a transcript file reference to `/api/v1/runs`. The orchestrator creates a `PipelineRun` record and publishes a `PipelineStartMessage` to Redis channel `pipeline:start`.
-2. **Transcription** -- A Python transcript agent processes the file and publishes back on `pipeline:transcript:done`. The orchestrator moves the run to `ANALYZING`.
-3. **Requirements extraction** -- A Python requirements agent analyzes the transcript, extracts structured requirements (title, description, priority, affected files, acceptance criteria), and publishes on `pipeline:requirements:done`. The orchestrator persists a `Requirement` entity and moves the run to `AWAITING_APPROVAL`.
-4. **Human approval gate** -- A reviewer inspects the extracted requirements via the frontend and either approves or rejects:
+1. **Upload** -- A client uploads a transcript file via `POST /api/v1/upload`. The file is stored in Google Drive and the returned `fileId`/`fileName` are used in subsequent steps.
+2. **Trigger** -- The frontend publishes a `PipelineStartMessage` to Redis stream `pipeline:start`. The orchestrator creates a `PipelineRun` record. The client then calls `POST /api/v1/start` to begin processing, which publishes a `TranscriptStartMessage` to `pipeline:transcript:start`.
+3. **Transcription** -- A Python transcript agent processes the file and publishes back on `pipeline:transcript:done`. The orchestrator moves the run to `ANALYZING`.
+4. **Requirements extraction** -- A Python requirements agent analyzes the transcript, extracts structured requirements (title, description, priority, acceptance criteria), and publishes on `pipeline:requirements:done`. The orchestrator persists a `Requirement` entity and moves the run to `AWAITING_APPROVAL`.
+5. **Human approval gate** -- A reviewer inspects the extracted requirements via the frontend (with the ability to edit them) and either approves or rejects:
    - **Approve** -- The orchestrator publishes a `CodingApprovedMessage` to `pipeline:coding:approved`, unblocking the coding agent. Run moves to `CODING`.
    - **Reject** -- The run moves to `FAILED` with the reviewer's rejection notes.
-5. **Code generation** -- The Python coding agent creates a PR and publishes on `pipeline:pr:created`. Run moves to `PULL_REQUEST_CREATED` and stores the PR URL.
-6. **PR review gate** -- A reviewer inspects the pull request via the provided link and either verifies or rejects:
+6. **Code generation** -- The Python coding agent creates a PR and publishes on `pipeline:pr:created`. Run moves to `PULL_REQUEST_CREATED` and stores the PR URL.
+7. **PR review gate** -- A reviewer inspects the pull request via the provided link and either verifies or rejects:
    - **Verify** -- The orchestrator publishes a `PrApprovedMessage` to `pipeline:pr:approved`, unblocking the mailing agent. Run moves to `MAILING`.
    - **Reject** -- The run moves to `FAILED` with the reviewer's rejection notes.
-7. **Mailing** -- The Python mailing agent composes and sends an email to the senior engineer about the requirement and PR, then publishes on `pipeline:complete`. Run moves to `COMPLETE`.
-8. **Failure** -- Any agent can publish to `pipeline:failed` at any point, which records the failing agent name and error message.
+8. **Mailing** -- The Python mailing agent composes and sends an email to the senior engineer about the requirement and PR, then publishes on `pipeline:complete`. Run moves to `COMPLETE`.
+9. **Failure** -- Any agent can publish to `pipeline:failed` at any point, which records the failing agent name and error message.
 
 ## Tech Stack
 
@@ -56,7 +58,9 @@ PENDING -> TRANSCRIBING -> ANALYZING -> AWAITING_APPROVAL -> CODING -> PULL_REQU
 | Language             | Java 21                     |
 | Framework            | Spring Boot 4.0.5           |
 | Database             | PostgreSQL                  |
-| Messaging            | Redis Pub/Sub               |
+| Messaging            | Redis Streams (consumer groups) |
+| File Storage         | Google Drive (OAuth2)       |
+| Secrets Management   | AWS SSM Parameter Store     |
 | ORM                  | Spring Data JPA / Hibernate |
 | Serialization        | Jackson                     |
 | Boilerplate          | Lombok                      |
@@ -68,28 +72,40 @@ PENDING -> TRANSCRIBING -> ANALYZING -> AWAITING_APPROVAL -> CODING -> PULL_REQU
 src/main/java/com/cascadeAI/Orchestrator/
 ├── OrchestratorApplication.java        # Entry point (@SpringBootApplication, @EnableAsync)
 ├── config/
-│   ├── RedisConfig.java                # RedisTemplate & listener container beans
-│   └── WebConfig.java                  # CORS configuration (allows localhost:5173)
+│   ├── AwsIAMConfig.java              # AWS IAM credentials from SSM
+│   ├── AwsSSMConfig.java              # AWS SSM client bean
+│   ├── GDriveProperties.java          # Google Drive config properties
+│   ├── PostgreDBConfig.java           # DataSource bean (credentials via SSM)
+│   ├── PostgreDBProperties.java       # DB config properties
+│   ├── RedisConfig.java               # RedisTemplate & stream listener container
+│   ├── RedisStreams.java              # Stream name bindings from config
+│   └── WebConfig.java                 # CORS configuration
 ├── controller/
 │   └── PipelineController.java         # REST API endpoints
 ├── dto/
+│   ├── PipelineStartMessage.java       # Inbound: new run from frontend
+│   ├── TranscriptStartMessage.java     # Outbound: trigger transcript agent
 │   ├── TranscriptDoneMessage.java      # Inbound: transcript agent done
 │   ├── RequirementsDoneMessage.java    # Inbound: requirements extracted
+│   ├── CodingApprovedMessage.java      # Outbound: unblock coding agent
 │   ├── PrCreatedMessage.java           # Inbound: PR created by coding agent
-│   ├── PipelineCompleteMessage.java    # Inbound: pipeline finished
-│   ├── PipelineFailedMessage.java      # Inbound: agent failure
-│   ├── PipelineStartMessage.java       # Outbound: trigger transcript agent
-│   └── CodingApprovedMessage.java      # Outbound: unblock coding agent
+│   ├── PrApprovedMessage.java          # Outbound: unblock mailing agent
+│   ├── PipelineCompleteMessage.java    # Inbound: mailing agent done
+│   └── PipelineFailedMessage.java      # Inbound: agent failure
 ├── model/
 │   ├── PipelineRun.java                # JPA entity -- pipeline run lifecycle
+│   ├── Transcript.java                 # JPA entity -- transcript file reference
 │   ├── Requirement.java                # JPA entity -- extracted requirement
 │   └── Approval.java                   # JPA entity -- approval decision
 ├── repository/
 │   ├── PipelineRunRepository.java      # Spring Data repo for PipelineRun
-│   └── RequirementRepository.java      # Spring Data repo for Requirement
+│   ├── RequirementRepository.java      # Spring Data repo for Requirement
+│   └── ApprovalRepository.java         # Spring Data repo for Approval
 └── service/
     ├── PipelineService.java            # Core business logic & state machine
-    └── QueueListenerService.java       # Registers Redis channel listeners
+    ├── QueueListenerService.java       # Redis Streams consumer group listeners
+    ├── GoogleDriveService.java         # Google Drive file upload (OAuth2)
+    └── ParameterStoreService.java      # AWS SSM parameter retrieval
 ```
 
 ## REST API
@@ -98,32 +114,35 @@ All endpoints are prefixed with `/api/v1`.
 
 | Method | Path                          | Description                        | Request Body                                     |
 |--------|-------------------------------|------------------------------------|--------------------------------------------------|
+| POST   | `/upload`                     | Upload file to Google Drive        | `multipart/form-data` with `file` field          |
 | GET    | `/runs`                       | List all pipeline runs (newest first) | --                                            |
 | GET    | `/runs/{id}`                  | Get a single run by UUID           | --                                               |
-| POST   | `/runs`                       | Start a new pipeline run           | `{ "transcriptFileId": "...", "transcriptFileName": "..." }` |
+| POST   | `/start`                      | Start transcript processing        | `{ "runId": "..." }`                             |
 | GET    | `/runs/{id}/requirements`     | Get requirements for a run         | --                                               |
-| POST   | `/runs/{id}/requirements/approve` | Approve requirements               | `{ "reviewerEmail": "...", "notes": "..." }`     |
-| POST   | `/runs/{id}/requirements/reject` | Reject requirements                | `{ "reviewerEmail": "...", "notes": "..." }`     |
-| POST   | `/runs/{id}/pr/verify`        | Verify pull request                | `{ "reviewerEmail": "...", "notes": "..." }`     |
+| PUT    | `/runs/{runId}/requirements/{reqId}` | Edit a requirement           | `{ "title": "...", "description": "...", "priority": "...", "acceptanceCriteria": [...] }` |
+| POST   | `/runs/{id}/requirements/approve` | Approve requirements           | `{ "reviewerEmail": "...", "notes": "...", "repoFullName": "..." }` |
+| POST   | `/runs/{id}/requirements/reject` | Reject requirements               | `{ "reviewerEmail": "...", "notes": "..." }`     |
+| POST   | `/runs/{id}/pr/verify`        | Verify PR, trigger mailing agent   | `{ "reviewerEmail": "...", "notes": "..." }`     |
 | POST   | `/runs/{id}/pr/reject`        | Reject pull request                | `{ "reviewerEmail": "...", "notes": "..." }`     |
 | GET    | `/health`                     | Health check                       | --                                               |
 
-## Redis Channels
+## Redis Streams
 
-Communication between the orchestrator and Python agents uses Redis Pub/Sub.
+Communication between the orchestrator and Python agents uses Redis Streams with consumer groups (group: `orchestrator`, consumer: `orchestrator-1`). Messages are published as `{"payload": "<json>"}` map entries.
 
 **Outbound (Orchestrator -> Python agents):**
 
-| Channel                      | Message DTO              | Trigger                        |
-|------------------------------|--------------------------|--------------------------------|
-| `pipeline:start`             | `PipelineStartMessage`   | New run created via REST API   |
-| `pipeline:coding:approved`   | `CodingApprovedMessage`  | Reviewer approves requirements |
-| `pipeline:pr:approved`       | `PrApprovedMessage`      | Reviewer verifies pull request |
+| Stream                         | Message DTO              | Trigger                        |
+|--------------------------------|--------------------------|--------------------------------|
+| `pipeline:transcript:start`    | `TranscriptStartMessage` | Pipeline run started via REST  |
+| `pipeline:coding:approved`     | `CodingApprovedMessage`  | Reviewer approves requirements |
+| `pipeline:pr:approved`         | `PrApprovedMessage`      | Reviewer verifies pull request |
 
 **Inbound (Python agents -> Orchestrator):**
 
-| Channel                       | Message DTO                | Effect                                     |
+| Stream                        | Message DTO                | Effect                                     |
 |-------------------------------|----------------------------|--------------------------------------------|
+| `pipeline:start`              | `PipelineStartMessage`     | Creates `PipelineRun` record               |
 | `pipeline:transcript:done`    | `TranscriptDoneMessage`    | Run status -> `ANALYZING`                  |
 | `pipeline:requirements:done`  | `RequirementsDoneMessage`  | Saves requirements, status -> `AWAITING_APPROVAL` |
 | `pipeline:pr:created`         | `PrCreatedMessage`         | Run status -> `PULL_REQUEST_CREATED`, stores PR URL |
@@ -132,7 +151,7 @@ Communication between the orchestrator and Python agents uses Redis Pub/Sub.
 
 ## Database Schema
 
-The application uses Hibernate with `ddl-auto: validate`, so the schema must exist before the app starts. Three tables are required:
+The application uses Hibernate with `ddl-auto: update`, so tables are auto-created/updated on startup. The schema consists of these tables:
 
 ### `pipeline_runs`
 
@@ -177,65 +196,37 @@ The application uses Hibernate with `ddl-auto: validate`, so the schema must exi
 ## Prerequisites
 
 - **Java 21**
-- **PostgreSQL** -- running on `localhost:5432` with a database named `pipeline`
+- **PostgreSQL** -- connection details configured via AWS SSM Parameter Store
 - **Redis** -- running on `localhost:6379`
+- **AWS credentials** -- with access to SSM parameters under `/CascadeAI/`
+- **Google OAuth credentials** -- `gdriveCredentials.json` in `src/main/resources/`
 
 ## Getting Started
 
-### 1. Set up PostgreSQL
+### 1. Configure AWS SSM Parameters
 
-Create the database and user:
+Ensure the following SSM parameters exist in your AWS account (`ap-south-1`):
 
-```sql
-CREATE USER pipeline WITH PASSWORD 'pipeline_secret';
-CREATE DATABASE pipeline OWNER pipeline;
-```
+| Parameter Path                                  | Description             |
+|-------------------------------------------------|-------------------------|
+| `/CascadeAI/access-key`                         | AWS IAM access key      |
+| `/CascadeAI/secret-key`                         | AWS IAM secret key      |
+| `/CascadeAI/Orchestrator/postgres-db/url`       | JDBC connection URL     |
+| `/CascadeAI/Orchestrator/postgres-db/username`  | Database username       |
+| `/CascadeAI/Orchestrator/postgres-db/password`  | Database password       |
+| `/CascadeAI/gdrive/folderId`                    | Google Drive folder ID  |
 
-Create the tables (Hibernate validates but does not create them):
+### 2. Set up Google Drive credentials
 
-```sql
-CREATE TABLE pipeline_runs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
-    transcript_file_id VARCHAR(255),
-    transcript_file_name VARCHAR(255),
-    meeting_date TIMESTAMP,
-    error_message TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT now(),
-    updated_at TIMESTAMP NOT NULL DEFAULT now()
-);
+Place your OAuth2 credentials file at `src/main/resources/gdriveCredentials.json`. On first startup, the app will open a browser for OAuth consent (port 8888).
 
-CREATE TABLE requirements (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id UUID NOT NULL REFERENCES pipeline_runs(id),
-    title VARCHAR(255) NOT NULL,
-    description TEXT,
-    priority VARCHAR(20) DEFAULT 'MEDIUM',
-    affected_files TEXT[],
-    acceptance_criteria TEXT[],
-    raw_spec JSONB,
-    created_at TIMESTAMP NOT NULL DEFAULT now()
-);
-
-CREATE TABLE approvals (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id UUID NOT NULL REFERENCES pipeline_runs(id),
-    requirement_id UUID REFERENCES requirements(id),
-    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
-    reviewer_email VARCHAR(255),
-    notes TEXT,
-    decided_at TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT now()
-);
-```
-
-### 2. Start Redis
+### 3. Start Redis
 
 ```bash
 redis-server
 ```
 
-### 3. Run the application
+### 4. Run the application
 
 Using the Maven Wrapper (no Maven installation required):
 
@@ -247,9 +238,9 @@ Using the Maven Wrapper (no Maven installation required):
 mvnw.cmd spring-boot:run
 ```
 
-The server starts on **http://localhost:8080**.
+The server starts on **http://localhost:8080**. Hibernate will auto-create/update tables (`ddl-auto: update`).
 
-### 4. Verify
+### 5. Verify
 
 ```bash
 curl http://localhost:8080/api/v1/health
@@ -258,17 +249,22 @@ curl http://localhost:8080/api/v1/health
 
 ## Configuration
 
-All configuration lives in `src/main/resources/application.yaml`. Key properties:
+All configuration lives in `src/main/resources/application.yaml`. Sensitive values (DB credentials, API keys, Drive folder ID) are stored in **AWS SSM Parameter Store** and fetched at runtime.
 
-| Property                          | Default                    | Description                          |
-|-----------------------------------|----------------------------|--------------------------------------|
-| `spring.datasource.url`          | `jdbc:postgresql://localhost:5432/pipeline` | PostgreSQL connection URL |
-| `spring.datasource.username`     | `pipeline`                 | Database user                        |
-| `spring.datasource.password`     | `pipeline_secret`          | Database password                    |
-| `spring.data.redis.host`         | `localhost`                | Redis host                           |
-| `spring.data.redis.port`         | `6379`                     | Redis port                           |
-| `server.port`                    | `8080`                     | HTTP server port                     |
-| `pipeline.senior-engineer-email` | `senior.engineer@yourcompany.com` | Notification recipient       |
-| `pipeline.queue.*`               | `pipeline:*`               | Redis channel names (see above)      |
+| Property                          | Default / SSM Path                      | Description                          |
+|-----------------------------------|-----------------------------------------|--------------------------------------|
+| `db.url`                         | `/CascadeAI/Orchestrator/postgres-db/url` | PostgreSQL connection URL (SSM)    |
+| `db.username`                    | `/CascadeAI/Orchestrator/postgres-db/username` | Database user (SSM)           |
+| `db.password`                    | `/CascadeAI/Orchestrator/postgres-db/password` | Database password (SSM)       |
+| `aws.ssm.region`                 | `ap-south-1`                            | AWS region for SSM client            |
+| `aws.iam-user.access-key`       | `/CascadeAI/access-key`                 | AWS access key (SSM path)            |
+| `aws.iam-user.secret-key`       | `/CascadeAI/secret-key`                 | AWS secret key (SSM path)            |
+| `spring.data.redis.host`         | `localhost`                             | Redis host                           |
+| `spring.data.redis.port`         | `6379`                                  | Redis port                           |
+| `server.port`                    | `8080`                                  | HTTP server port                     |
+| `pipeline.senior-engineer-email` | --                                      | Notification recipient email         |
+| `pipeline.queue.*`               | `pipeline:*`                            | Redis stream names (see above)       |
+| `google.drive.credentials-path` | `classpath:gdriveCredentials.json`       | Google OAuth credentials file        |
+| `google.drive.folder-id`        | `/CascadeAI/gdrive/folderId`            | Drive upload folder ID (SSM path)    |
 
-Override any property via environment variables (e.g., `SPRING_DATASOURCE_URL`) or a `application-local.yaml` profile.
+Override any property via environment variables (e.g., `SPRING_DATA_REDIS_HOST`) or a `application-local.yaml` profile.
