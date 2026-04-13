@@ -3,6 +3,7 @@ package com.cascadeAI.Orchestrator.model;
 import jakarta.persistence.*;
 import lombok.*;
 import lombok.experimental.FieldDefaults;
+import com.fasterxml.jackson.annotation.JsonBackReference;
 
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.JdbcTypeCode;
@@ -10,7 +11,6 @@ import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.UUID;
 
 @Entity
 @Table(name = "requirements")
@@ -19,14 +19,17 @@ import java.util.UUID;
 @AllArgsConstructor
 @Builder
 @FieldDefaults(level = AccessLevel.PRIVATE)
+@ToString(exclude = "run")
+@EqualsAndHashCode(exclude = "run")
 public class Requirement {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
-    UUID id;
+    String id;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "run_id", nullable = false)
+    @JsonBackReference
     PipelineRun run;
 
     @Column(nullable = false)
@@ -38,10 +41,6 @@ public class Requirement {
     @Enumerated(EnumType.STRING)
     @Builder.Default
     Priority priority = Priority.MEDIUM;
-
-    @JdbcTypeCode(SqlTypes.ARRAY)
-    @Column(columnDefinition = "text[]")
-    List<String> affectedFiles;
 
     @JdbcTypeCode(SqlTypes.ARRAY)
     @Column(columnDefinition = "text[]")

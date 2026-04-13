@@ -2,42 +2,67 @@ spring:
   application:
     name: CascadeAI-Orchestrator
 
-  datasource:
-    url: jdbc:postgresql://localhost:5432/pipeline
-    username: pipeline
-    password: pipeline_secret
-    driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: always
 
   jpa:
+    defer-datasource-initialization: true
     hibernate:
-      ddl-auto: validate
+      ddl-auto: update
     show-sql: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         format_sql: true
 
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
   data:
     redis:
       host: localhost
       port: 6379
-      timeout: 2000ms
+      timeout: 5000ms
+
+aws:
+  ssm:
+    region: ap-south-1
+  iam-user:
+    access-key: /CascadeAI/access-key
+    secret-key: /CascadeAI/secret-key
+
+db:
+  url: /CascadeAI/Orchestrator/postgres-db/url
+  username: /CascadeAI/Orchestrator/postgres-db/username
+  password: /CascadeAI/Orchestrator/postgres-db/password
+  driver-class-name: org.postgresql.Driver
 
 server:
   port: 8080
 
 pipeline:
-  senior-engineer-email: senior.engineer@yourcompany.com
+  senior-engineer-email: "[EMAIL_ADDRESS]"
   queue:
     # Channels published TO Python
-    start: "pipeline:start"
+    transcript-start: "pipeline:transcript:start"
     coding-approved: "pipeline:coding:approved"
+    pr-approved: "pipeline:pr:approved"
+
     # Channels consumed FROM Python
+    pipeline-start: "pipeline:start"
     transcript-done: "pipeline:transcript:done"
     requirements-done: "pipeline:requirements:done"
     pr-created: "pipeline:pr:created"
     complete: "pipeline:complete"
     failed: "pipeline:failed"
+
+google:
+  drive:
+    credentials-path: ${GOOGLE_CREDENTIALS_PATH:classpath:gdriveCredentials.json}
+    folder-id: /CascadeAI/gdrive/folderId
 
 logging:
   level:

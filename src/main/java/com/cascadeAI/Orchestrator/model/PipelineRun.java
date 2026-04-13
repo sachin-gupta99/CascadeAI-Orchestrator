@@ -3,12 +3,12 @@ package com.cascadeAI.Orchestrator.model;
 import jakarta.persistence.*;
 import lombok.*;
 import lombok.experimental.FieldDefaults;
+import com.fasterxml.jackson.annotation.JsonManagedReference;
 
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.Instant;
-import java.util.UUID;
 
 @Entity
 @Table(name = "pipeline_runs")
@@ -17,23 +17,33 @@ import java.util.UUID;
 @AllArgsConstructor
 @Builder
 @FieldDefaults(level = AccessLevel.PRIVATE)
+@ToString(exclude = "transcript")
+@EqualsAndHashCode(exclude = "transcript")
 public class PipelineRun {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
-    UUID id;
+    @Column(unique = true, nullable = false, name = "run_id")
+    String runId;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     @Builder.Default
     RunStatus status = RunStatus.PENDING;
 
-    String transcriptFileId;
-    String transcriptFileName;
+    @Column(name = "pipeline_name")
+    String pipelineName;
+
+    @OneToOne(mappedBy = "run", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @JsonManagedReference
+    Transcript transcript;
+
     Instant meetingDate;
 
     @Column(columnDefinition = "TEXT")
     String errorMessage;
+
+    @Column(name = "pull_request_url")
+    String pullRequestUrl;
 
     @CreationTimestamp
     Instant createdAt;
@@ -43,7 +53,7 @@ public class PipelineRun {
 
     public enum RunStatus {
         PENDING, TRANSCRIBING, ANALYZING,
-        AWAITING_APPROVAL, CODING, SUPERVISING,
-        COMPLETE, FAILED
+        AWAITING_APPROVAL, CODING, PULL_REQUEST_CREATED,
+        MAILING, COMPLETE, FAILED
     }
 }

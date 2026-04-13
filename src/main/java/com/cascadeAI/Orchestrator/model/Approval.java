@@ -3,11 +3,11 @@ package com.cascadeAI.Orchestrator.model;
 import jakarta.persistence.*;
 import lombok.*;
 import lombok.experimental.FieldDefaults;
+import com.fasterxml.jackson.annotation.JsonBackReference;
 
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
-import java.util.UUID;
 
 @Entity
 @Table(name = "approvals")
@@ -16,18 +16,22 @@ import java.util.UUID;
 @AllArgsConstructor
 @Builder
 @FieldDefaults(level = AccessLevel.PRIVATE)
+@ToString(exclude = { "run", "requirement" })
+@EqualsAndHashCode(exclude = { "run", "requirement" })
 public class Approval {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
-    UUID id;
+    String id;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "run_id", nullable = false)
+    @JsonBackReference
     PipelineRun run;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "requirement_id")
+    @JsonBackReference
     Requirement requirement;
 
     @Enumerated(EnumType.STRING)
