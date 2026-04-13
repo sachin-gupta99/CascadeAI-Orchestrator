@@ -1,15 +1,15 @@
 package com.cascadeAI.Orchestrator.dto;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
 @Data
-@JsonIgnoreProperties(ignoreUnknown = true)
-public class PrCreatedMessage {
+public class PrApprovedMessage {
     private String runId;
     private String prUrl;
     private Integer prNumber;
     private String branchName;
     private String repoFullName;
-    private String diffSummary;
+    private String reviewerEmail;
+    private String notes;
+    private String seniorEngineerEmail;
 }

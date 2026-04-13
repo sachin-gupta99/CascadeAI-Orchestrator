@@ -31,20 +31,23 @@ Spring Boot service that orchestrates an AI-powered pipeline for turning meeting
 Each pipeline run progresses through these stages:
 
 ```
-PENDING -> TRANSCRIBING -> ANALYZING -> AWAITING_APPROVAL -> CODING -> SUPERVISING -> COMPLETE
-                                              |                                          |
-                                         (rejected) --------------------------------> FAILED
+PENDING -> TRANSCRIBING -> ANALYZING -> AWAITING_APPROVAL -> CODING -> PULL_REQUEST_CREATED -> MAILING -> COMPLETE
+                                              |                              |
+                                         (rejected) ----+--- (PR rejected) -+---> FAILED
 ```
 
 1. **Trigger** -- A client POSTs a transcript file reference to `/api/v1/runs`. The orchestrator creates a `PipelineRun` record and publishes a `PipelineStartMessage` to Redis channel `pipeline:start`.
 2. **Transcription** -- A Python transcript agent processes the file and publishes back on `pipeline:transcript:done`. The orchestrator moves the run to `ANALYZING`.
 3. **Requirements extraction** -- A Python requirements agent analyzes the transcript, extracts structured requirements (title, description, priority, affected files, acceptance criteria), and publishes on `pipeline:requirements:done`. The orchestrator persists a `Requirement` entity and moves the run to `AWAITING_APPROVAL`.
-4. **Human approval gate** -- A reviewer (typically a senior engineer) inspects the extracted requirements via the frontend and either approves or rejects:
+4. **Human approval gate** -- A reviewer inspects the extracted requirements via the frontend and either approves or rejects:
    - **Approve** -- The orchestrator publishes a `CodingApprovedMessage` to `pipeline:coding:approved`, unblocking the coding agent. Run moves to `CODING`.
    - **Reject** -- The run moves to `FAILED` with the reviewer's rejection notes.
-5. **Code generation** -- The Python coding agent creates a PR and publishes on `pipeline:pr:created`. Run moves to `SUPERVISING`.
-6. **Completion** -- Once the pipeline finishes end-to-end, a message on `pipeline:complete` moves the run to `COMPLETE`.
-7. **Failure** -- Any agent can publish to `pipeline:failed` at any point, which records the failing agent name and error message.
+5. **Code generation** -- The Python coding agent creates a PR and publishes on `pipeline:pr:created`. Run moves to `PULL_REQUEST_CREATED` and stores the PR URL.
+6. **PR review gate** -- A reviewer inspects the pull request via the provided link and either verifies or rejects:
+   - **Verify** -- The orchestrator publishes a `PrApprovedMessage` to `pipeline:pr:approved`, unblocking the mailing agent. Run moves to `MAILING`.
+   - **Reject** -- The run moves to `FAILED` with the reviewer's rejection notes.
+7. **Mailing** -- The Python mailing agent composes and sends an email to the senior engineer about the requirement and PR, then publishes on `pipeline:complete`. Run moves to `COMPLETE`.
+8. **Failure** -- Any agent can publish to `pipeline:failed` at any point, which records the failing agent name and error message.
 
 ## Tech Stack
 
@@ -99,8 +102,10 @@ All endpoints are prefixed with `/api/v1`.
 | GET    | `/runs/{id}`                  | Get a single run by UUID           | --                                               |
 | POST   | `/runs`                       | Start a new pipeline run           | `{ "transcriptFileId": "...", "transcriptFileName": "..." }` |
 | GET    | `/runs/{id}/requirements`     | Get requirements for a run         | --                                               |
-| POST   | `/runs/{id}/approve`          | Approve requirements               | `{ "reviewerEmail": "...", "notes": "..." }`     |
-| POST   | `/runs/{id}/reject`           | Reject requirements                | `{ "reviewerEmail": "...", "notes": "..." }`     |
+| POST   | `/runs/{id}/requirements/approve` | Approve requirements               | `{ "reviewerEmail": "...", "notes": "..." }`     |
+| POST   | `/runs/{id}/requirements/reject` | Reject requirements                | `{ "reviewerEmail": "...", "notes": "..." }`     |
+| POST   | `/runs/{id}/pr/verify`        | Verify pull request                | `{ "reviewerEmail": "...", "notes": "..." }`     |
+| POST   | `/runs/{id}/pr/reject`        | Reject pull request                | `{ "reviewerEmail": "...", "notes": "..." }`     |
 | GET    | `/health`                     | Health check                       | --                                               |
 
 ## Redis Channels
@@ -113,6 +118,7 @@ Communication between the orchestrator and Python agents uses Redis Pub/Sub.
 |------------------------------|--------------------------|--------------------------------|
 | `pipeline:start`             | `PipelineStartMessage`   | New run created via REST API   |
 | `pipeline:coding:approved`   | `CodingApprovedMessage`  | Reviewer approves requirements |
+| `pipeline:pr:approved`       | `PrApprovedMessage`      | Reviewer verifies pull request |
 
 **Inbound (Python agents -> Orchestrator):**
 
@@ -120,7 +126,7 @@ Communication between the orchestrator and Python agents uses Redis Pub/Sub.
 |-------------------------------|----------------------------|--------------------------------------------|
 | `pipeline:transcript:done`    | `TranscriptDoneMessage`    | Run status -> `ANALYZING`                  |
 | `pipeline:requirements:done`  | `RequirementsDoneMessage`  | Saves requirements, status -> `AWAITING_APPROVAL` |
-| `pipeline:pr:created`         | `PrCreatedMessage`         | Run status -> `SUPERVISING`                |
+| `pipeline:pr:created`         | `PrCreatedMessage`         | Run status -> `PULL_REQUEST_CREATED`, stores PR URL |
 | `pipeline:complete`           | `PipelineCompleteMessage`  | Run status -> `COMPLETE`                   |
 | `pipeline:failed`             | `PipelineFailedMessage`    | Run status -> `FAILED`, records error      |
 
@@ -133,7 +139,7 @@ The application uses Hibernate with `ddl-auto: validate`, so the schema must exi
 | Column                | Type         | Notes                          |
 |-----------------------|--------------|--------------------------------|
 | `id`                  | `UUID`       | PK, auto-generated             |
-| `status`              | `VARCHAR`    | Enum: PENDING, TRANSCRIBING, ANALYZING, AWAITING_APPROVAL, CODING, SUPERVISING, COMPLETE, FAILED |
+| `status`              | `VARCHAR`    | Enum: PENDING, TRANSCRIBING, ANALYZING, AWAITING_APPROVAL, CODING, PULL_REQUEST_CREATED, MAILING, COMPLETE, FAILED |
 | `transcript_file_id`  | `VARCHAR`    |                                |
 | `transcript_file_name`| `VARCHAR`    |                                |
 | `meeting_date`        | `TIMESTAMP`  |                                |
