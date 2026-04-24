@@ -268,3 +268,10 @@ All configuration lives in `src/main/resources/application.yaml`. Sensitive valu
 | `google.drive.folder-id`        | `/CascadeAI/gdrive/folderId`            | Drive upload folder ID (SSM path)    |
 
 Override any property via environment variables (e.g., `SPRING_DATA_REDIS_HOST`) or a `application-local.yaml` profile.
+
+## Related Repositories
+
+CascadeAI is a multi-repo project. See the other components:
+
+- [**CascadeAI-Agents**](https://github.com/sachin-gupta99/CascadeAI-Agents) — Python AI agent pipeline — multi-stage agents (transcript, requirements, coding, PR, email) powered by LLMs and coordinated through Redis Streams
+- [**CascadeAI-UI**](https://github.com/sachin-gupta99/CascadeAI-UI) — React/TypeScript web interface — upload transcripts, monitor pipeline progress, review requirements, and approve PRs
